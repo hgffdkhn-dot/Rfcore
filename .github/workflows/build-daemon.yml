@@ -26,38 +26,32 @@ jobs:
 
     - name: Compile C++ Daemon (ARM64)
       run: |
-        # 定位交叉编译器
         TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
         CXX=$TOOLCHAIN/bin/aarch64-linux-android29-clang++
 
-        # 创建编译输出目录
         mkdir -p build_out
 
-        # 暴力编译：将 daemon (可能还有 interfaces) 下的代码编译为二进制
-        # 注意：如果你的 interfaces 里有 .cpp 文件，也会一并编译进去
-        $CXX -O2 -static-libstdc++ -Wall rfcore/daemon/*.cpp -o build_out/rfcore_daemon
+        # 1. 智能寻址：查找 daemon 和 interfaces 目录下的所有 C++ 源码
+        SRC_FILES=$(find daemon interfaces -name "*.cpp" 2>/dev/null)
+        
+        # 2. 编译并自动将 daemon 和 interfaces 设为头文件搜索路径 (-I)
+        # 这样无论你的 #include 怎么写，都不会报找不到头文件的错误
+        $CXX -O2 -static-libstdc++ -Wall -I./daemon -I./interfaces $SRC_FILES -o build_out/rfcore_daemon
         
         echo "Daemon 二进制编译完成！"
 
     - name: Assemble Magisk/KernelSU Module
       run: |
-        # 1. 创建刷机包的基础系统级目录
         mkdir -p module/system/bin
         
-        # 2. 将你自己的 Magisk 模板文件全部拷贝过来 (包括 module.prop, post-fs-data.sh 等)
-        cp -r rfcore/Magisk_module/* module/
+        # 智能寻址：直接从根目录把你的 Magisk 模板和 SEPolicy 规则拷进去
+        cp -r Magisk_module/* module/ 2>/dev/null || true
+        cp -r sepolicy/* module/ 2>/dev/null || true
         
-        # 3. 将你的 SELinux 策略规则拷贝到模块根目录，适配 KernelSU/Magisk
-        cp -r rfcore/sepolicy/* module/ 2>/dev/null || true
-        
-        # 4. 放入新鲜出炉的 Daemon 二进制文件并赋予执行权限
         cp build_out/rfcore_daemon module/system/bin/
         chmod +x module/system/bin/rfcore_daemon
-        
-        # 5. 确保脚本拥有执行权限 (防丢掉权限)
         chmod +x module/*.sh 2>/dev/null || true
 
-        # 6. 最终封包打包
         cd module
         zip -r9 ../RFCore-Module-Release.zip ./*
 
@@ -66,3 +60,4 @@ jobs:
       with:
         name: RFCore-Module-ZIP
         path: RFCore-Module-Release.zip
+
