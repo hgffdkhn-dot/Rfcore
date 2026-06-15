@@ -136,4 +136,24 @@ jobs:
         if [ -f "build_out/rfcore_daemon" ]; then
             echo "Daemon 编译成功！"
         else
-            echo 
+            echo "Daemon 编译失败，请查看错误日志。"
+            exit 1
+        fi
+
+    - name: Assemble Magisk/KernelSU Module
+      run: |
+        mkdir -p module/system/bin
+        cp -r Magisk_module/* module/ 2>/dev/null || true
+        cp -r sepolicy/* module/ 2>/dev/null || true
+        cp build_out/rfcore_daemon module/system/bin/
+        chmod +x module/system/bin/rfcore_daemon
+        chmod +x module/*.sh 2>/dev/null || true
+
+        cd module
+        zip -r9 ../RFCore-Module-Release.zip ./*
+
+    - name: Upload Module Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: RFCore-Module-ZIP
+        path: RFCore-Module-Release.zip
