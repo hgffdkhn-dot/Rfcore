@@ -21,7 +21,7 @@ jobs:
         unzip -q android-ndk-r26d-linux.zip
         echo "NDK_PATH=$PWD/android-ndk-r26d" >> $GITHUB_ENV
 
-    - name: Auto-Patch (云端终极防弹修补)
+    - name: Auto-Patch (云端终极防弹修补 V2)
       run: |
         echo "1. 下载 SQLite3..."
         wget -q https://sqlite.org/2023/sqlite-amalgamation-3430200.zip
@@ -29,11 +29,25 @@ jobs:
         cp sqlite-amalgamation-3430200/sqlite3.h daemon/
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
-        echo "2. 暴力解决 binder_manager.h 缺失 (注入底层 C 符号)..."
-        # 删掉找不到的头文件
+        echo "2. 暴力解决所有隐藏的 Binder 头文件 (注入假头文件)..."
+        # 删掉所有官方 NDK 拒绝提供的头文件
         sed -i '/#include <android\/binder_manager.h>/d' daemon/main.cpp 2>/dev/null || true
-        # 强行在文件头部注入底层接口声明，绕过头文件检查直达 .so 库
-        sed -i '1i struct AIBinder;\nextern "C" int AServiceManager_addService(AIBinder* binder, const char* instance);' daemon/main.cpp 2>/dev/null || true
+        sed -i '/#include <android\/binder_process.h>/d' daemon/main.cpp 2>/dev/null || true
+        
+        # 伪造一个包含底层 C 符号的声明文件
+        cat << 'EOF' > daemon/fake_binder_api.h
+        #pragma once
+        #include <stdint.h>
+        struct AIBinder;
+        extern "C" {
+            int AServiceManager_addService(AIBinder* binder, const char* instance);
+            void ABinderProcess_setThreadPoolMaxThreadCount(uint32_t count);
+            void ABinderProcess_startThreadPool();
+            void ABinderProcess_joinThreadPool();
+        }
+        EOF
+        # 强行塞入 main.cpp 的第一行
+        sed -i '1i #include "fake_binder_api.h"' daemon/main.cpp 2>/dev/null || true
         
         echo "3. 注入 AOSP 兼容垫片 (保护你的其他旧文件)..."
         mkdir -p fake_aosp/android-base
