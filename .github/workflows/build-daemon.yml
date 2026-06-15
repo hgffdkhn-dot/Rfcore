@@ -24,74 +24,51 @@ jobs:
         fi
         echo "NDK_PATH=$NDK_PATH" >> $GITHUB_ENV
 
-    - name: AOSP to NDK Auto-Patch V3 (修复 C/C++ 混编与头文件寻址)
+    - name: Prepare SQLite3 & Compile AIDL (NDK Backend)
       run: |
-        echo "开始注入 V3 版兼容垫片..."
-        
-        # 1. 植入 SQLite3 源码包
+        echo "1. 下载 SQLite3 源码..."
         wget -q https://sqlite.org/2023/sqlite-amalgamation-3430200.zip
         unzip -q sqlite-amalgamation-3430200.zip
         cp sqlite-amalgamation-3430200/sqlite3.h daemon/
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
-        # 2. 暴力修复 C++ 引入 AIDL 的后缀名语法错误
-        find . -name "*.h" -o -name "*.cpp" | xargs sed -i 's/\.aidl/\.h/g'
-
-        # 3. 伪造 AOSP 日志库
-        mkdir -p fake_aosp/android-base
-        cat << 'EOF' > fake_aosp/android-base/logging.h
-        #pragma once
-        #include <android/log.h>
-        #include <sstream>
-        class MockLog {
-        public:
-            ~MockLog() { __android_log_print(ANDROID_LOG_INFO, "RFCore", "%s", s.str().c_str()); }
-            std::stringstream s;
-        };
-        #define LOG(level) MockLog().s
-        EOF
-
-        # 4. 编译 AIDL 并构造完美的 <aidl/...> 头文件目录树
+        echo "2. 使用 NDK 模式编译 AIDL..."
+        # 核心改动：使用 --lang=ndk 参数，系统会自动生成标准 C++17 的存根代码
         AIDL_BIN=$(ls -1d $ANDROID_HOME/build-tools/*/aidl | tail -n 1)
         mkdir -p aidl_out
-        mkdir -p fake_includes/aidl
+        mkdir -p aidl_headers
         
         find . -name "*.aidl" | while read file; do
-           # 尝试利用 -h 参数直接输出头文件树，如果不支持则退化复制
-           $AIDL_BIN --lang=cpp -I ./interfaces/aidl -I ./interfaces -I ./ -o aidl_out -h fake_includes/aidl $file 2>/dev/null || true
+           $AIDL_BIN --lang=ndk -I ./interfaces/aidl -I ./interfaces -I ./ -o aidl_out -h aidl_headers $file 2>/dev/null || true
         done
-        # 兜底：强行将输出包层级移入 aidl 文件夹内
-        cp -r aidl_out/* fake_includes/aidl/ 2>/dev/null || true
-        echo "V3 垫片注入完成！"
+        echo "AIDL 存根与头文件生成完毕！"
 
-    - name: Compile C++ Daemon (ARM64)
+    - name: Compile C/C++ Daemon (ARM64)
       run: |
         TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
-        # 引入纯 C 编译器 (clang) 和 C++ 编译器 (clang++)
         CC=$TOOLCHAIN/bin/aarch64-linux-android29-clang
         CXX=$TOOLCHAIN/bin/aarch64-linux-android29-clang++
 
         mkdir -p build_out
         
-        # 第 1 步：用 C 编译器单独编译 SQLite3，避开 C++ 的 new 关键字冲突
-        echo "正在编译 SQLite3 核心库..."
+        echo "编译 SQLite3 纯 C 核心库..."
         $CC -O2 -c daemon/sqlite3.c -o build_out/sqlite3.o
 
-        # 第 2 步：抓取 C++ 源码和生成的 AIDL 存根
+        echo "抓取重构后的 C++ 源码和生成的 NDK 存根..."
         SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3)
         
-        # 第 3 步：合体编译！加入 fake_includes 解决头文件找不到的问题，并链接 sqlite3.o
-        echo "正在编译核心 Daemon C++ 代码..."
-        $CXX -O2 -static-libstdc++ -Wall \
-          -I./daemon -I./interfaces -I./interfaces/aidl \
-          -I./fake_aosp -I./fake_includes -I./aidl_out \
+        echo "开始合体编译核心 Daemon..."
+        # 核心改动：启用 -std=c++17 规范，直接链接底层的 NDK Binder 库
+        $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
+          -I./daemon -I./interfaces/aidl \
+          -I./aidl_headers -I./aidl_out \
           $SRC_FILES build_out/sqlite3.o \
           -o build_out/rfcore_daemon -llog -ldl -lbinder_ndk || true
         
         if [ -f "build_out/rfcore_daemon" ]; then
-            echo "Daemon 编译成功！"
+            echo "Daemon 二进制编译成功！"
         else
-            echo "Daemon 编译失败，请查看上方报错日志。"
+            echo "Daemon 编译失败，请查看错误日志。"
             exit 1
         fi
 
