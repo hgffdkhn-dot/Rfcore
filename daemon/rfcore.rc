@@ -1,0 +1,23 @@
+# rfcore.rc
+# RFCore Daemon 启动脚本
+# 采用 late-init 阶段拉起，确保 /data 已经解密挂载（如果需要读取策略数据库）
+
+on late-init
+    # 确保执行文件具备正确的权限
+    chmod 0755 /system/bin/rfcore_daemon
+    # 启动我们的守护进程
+    start rfcore_daemon
+
+# 定义 service，直接在定义时通过 seclabel 切域，干净利落
+service rfcore_daemon /system/bin/rfcore_daemon
+    class core
+    user root
+    group root
+    # 强制将进程标签设置为 rfcore_domain
+    seclabel u:r:rfcore_domain:s0
+    # disabled 意味着不会随 init 自动启动，除非我们在上方 on late-init 显式 start
+    disabled
+    # 配合 C++ 代码中的 LOG(FATAL)，一旦进程崩溃退出，init 会自动尝试拉起它，保证高可用
+    restart
+    # 屏蔽 OOM 查杀，保障底层 Binder 响应能力
+    oom_score_adjust -1000

@@ -1,0 +1,15 @@
+# 定义类型
+type rfcore_domain, domain;
+type rfcore_daemon_exec, exec_type, file_type, system_file_type;
+
+# 允许 init 拉起该 domain（这是官方允许的常规 transition）
+init_daemon_domain(rfcore_domain)
+
+# 基础生存权：允许自身进程的内存管理、信号发送
+allow rfcore_domain self:process { fork signal_deliver sigkill sigchld };
+
+# 允许使用基础的日志输出 (logd)
+allow rfcore_domain logdw_socket:sock_file write;
+allow rfcore_domain logd:unix_dgram_socket sendto;
+
+# -- 注意：这里绝对不写 binder_call 或 capability sys_admin，以完美规避 neverallow --

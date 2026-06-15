@@ -1,0 +1,36 @@
+// 声明 AIDL 接口模块，自动生成 Java 和 C++ (NDK) 的 Binder 通信代码
+aidl_interface {
+    name: "rfcore_daemon_interface",
+    
+    // 显式列出所有的 AIDL 契约文件，避免使用通配符导致的增量编译失效问题
+    srcs: [
+        "aidl/rfcore/daemon/CapabilityRequest.aidl",
+        "aidl/rfcore/daemon/CapabilityResult.aidl",
+        "aidl/rfcore/daemon/IRFCoreService.aidl",
+        "aidl/rfcore/daemon/IRFCoreBootstrap.aidl", // 新增的看门人接口
+    ],
+    
+    // 标记为 unstable。在 MVP 开发阶段我们的接口结构可能频繁改动，
+    // 开启此项可以跳过 AIDL 的 API hash 冻结校验。
+    unstable: true,
+    
+    // 配置目标后端语言
+    backend: {
+        java: {
+            enabled: true,
+            // 允许 Java 客户端（如 Manager App）使用 Android 平台私有 API
+            platform_apis: true, 
+        },
+        ndk: {
+            // 启用现代 C++ 后端，生成基于 std::shared_ptr 的代码
+            enabled: true,
+        },
+        cpp: {
+            // 禁用老旧的 libbinder 后端，减小编译产物体积并降低耦合
+            enabled: false, 
+        },
+        rust: {
+            enabled: false,
+        },
+    },
+}

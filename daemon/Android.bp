@@ -1,0 +1,35 @@
+// 声明 C++ 可执行文件，即我们的 Root 守护进程
+cc_binary {
+    name: "rfcore_daemon",
+    
+    // 显式列出所有 C++ 源文件
+    srcs: [
+        "main.cpp",
+        "RFCoreService.cpp",
+        "RFCoreBootstrap.cpp", // 新增的看门人实现
+    ],
+    
+    // 动态链接 AOSP 基础系统库
+    shared_libs: [
+        "libbase",         // 提供强健的 Log 和字符串处理能力
+        "liblog",          // Android 底层日志系统
+        "libbinder_ndk",   // 稳定的 NDK Binder 驱动通信库
+        
+        // 依赖我们在上面定义的 AIDL 模块生成的 NDK 后端库。
+        // 注意：Soong 会自动在模块名后追加版本后缀（unstable 默认为 -V1-ndk 或 -ndk，具体取决于 Android 版本树，
+        // 在 Android 14+ 通常以 -V1-ndk 为起始挂载点，如果不指定版本可直接写 "rfcore_daemon_interface-ndk"）
+        "rfcore_daemon_interface-V1-ndk", 
+    ],
+    
+    // 严格的编译选项，防范内存越界和未定义行为
+    cflags: [
+        "-Wall",
+        "-Werror",  // 视警告为错误，强制保证代码质量
+        "-Wextra",
+    ],
+    
+    // 如果后续需要链接 SQLite 加密库 (如 sqlcipher)，可以在此处增加 static_libs
+    // static_libs: [
+    //     "libsqlcipher",
+    // ],
+}
