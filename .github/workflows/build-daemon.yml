@@ -33,7 +33,6 @@ jobs:
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
         echo "2. 使用 NDK 模式编译 AIDL..."
-        # 核心改动：使用 --lang=ndk 参数，系统会自动生成标准 C++17 的存根代码
         AIDL_BIN=$(ls -1d $ANDROID_HOME/build-tools/*/aidl | tail -n 1)
         mkdir -p aidl_out
         mkdir -p aidl_headers
@@ -46,8 +45,9 @@ jobs:
     - name: Compile C/C++ Daemon (ARM64)
       run: |
         TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
-        CC=$TOOLCHAIN/bin/aarch64-linux-android29-clang
-        CXX=$TOOLCHAIN/bin/aarch64-linux-android29-clang++
+        # 🎯 核心修复：将目标系统 API 提升至 31，解锁现代 Binder 特性
+        CC=$TOOLCHAIN/bin/aarch64-linux-android31-clang
+        CXX=$TOOLCHAIN/bin/aarch64-linux-android31-clang++
 
         mkdir -p build_out
         
@@ -58,7 +58,6 @@ jobs:
         SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3)
         
         echo "开始合体编译核心 Daemon..."
-        # 核心改动：启用 -std=c++17 规范，直接链接底层的 NDK Binder 库
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
           -I./daemon -I./interfaces/aidl \
           -I./aidl_headers -I./aidl_out \
