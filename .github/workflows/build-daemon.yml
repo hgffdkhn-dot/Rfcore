@@ -21,7 +21,7 @@ jobs:
         unzip -q android-ndk-r26d-linux.zip
         echo "NDK_PATH=$PWD/android-ndk-r26d" >> $GITHUB_ENV
 
-    - name: Auto-Patch (云端终极防弹修补 V2)
+    - name: Auto-Patch (云端终极防弹修补 V3 - 运行时动态劫持)
       run: |
         echo "1. 下载 SQLite3..."
         wget -q https://sqlite.org/2023/sqlite-amalgamation-3430200.zip
@@ -29,27 +29,63 @@ jobs:
         cp sqlite-amalgamation-3430200/sqlite3.h daemon/
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
-        echo "2. 暴力解决所有隐藏的 Binder 头文件 (注入假头文件)..."
-        # 删掉所有官方 NDK 拒绝提供的头文件
-        sed -i '/#include <android\/binder_manager.h>/d' daemon/main.cpp 2>/dev/null || true
-        sed -i '/#include <android\/binder_process.h>/d' daemon/main.cpp 2>/dev/null || true
-        
-        # 伪造一个包含底层 C 符号的声明文件
-        cat << 'EOF' > daemon/fake_binder_api.h
-        #pragma once
-        #include <stdint.h>
-        struct AIBinder;
-        extern "C" {
-            int AServiceManager_addService(AIBinder* binder, const char* instance);
-            void ABinderProcess_setThreadPoolMaxThreadCount(uint32_t count);
-            void ABinderProcess_startThreadPool();
-            void ABinderProcess_joinThreadPool();
+        echo "2. 替换 main.cpp 为 dlopen 动态调用 (彻底绕过 NDK 链接器阉割)..."
+        cat << 'EOF' > daemon/main.cpp
+        #include "RFCoreBootstrap.h"
+        #include "RFCoreService.h"
+        #include <android/log.h>
+        #include <dlfcn.h>
+        #include <string>
+
+        #define LOG_TAG "RFCoreDaemon"
+        #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+        #define LOGF(...) __android_log_print(ANDROID_LOG_FATAL, LOG_TAG, __VA_ARGS__)
+
+        using rfcore::daemon::RFCoreBootstrap;
+        using rfcore::daemon::RFCoreService;
+
+        // 定义函数指针类型
+        typedef void (*set_threads_t)(uint32_t);
+        typedef void (*start_pool_t)();
+        typedef void (*join_pool_t)();
+        typedef int (*add_service_t)(AIBinder*, const char*);
+
+        int main() {
+            LOGI("Starting RFCore Daemon process...");
+            
+            // 运行时直接装载系统真实的底层库
+            void* handle = dlopen("libbinder_ndk.so", RTLD_NOW);
+            if (!handle) { LOGF("dlopen failed"); return -1; }
+
+            // 强行抠出被隐藏的底层函数
+            auto set_threads = (set_threads_t)dlsym(handle, "ABinderProcess_setThreadPoolMaxThreadCount");
+            auto start_pool = (start_pool_t)dlsym(handle, "ABinderProcess_startThreadPool");
+            auto join_pool = (join_pool_t)dlsym(handle, "ABinderProcess_joinThreadPool");
+            auto add_service = (add_service_t)dlsym(handle, "AServiceManager_addService");
+
+            if (!set_threads || !start_pool || !join_pool || !add_service) {
+                LOGF("dlsym resolve failed"); return -1;
+            }
+
+            set_threads(4);
+            start_pool();
+
+            std::shared_ptr<RFCoreService> worker = ndk::SharedRefBase::make<RFCoreService>();
+            std::shared_ptr<RFCoreBootstrap> bootstrap = ndk::SharedRefBase::make<RFCoreBootstrap>(worker);
+
+            int status = add_service(bootstrap->asBinder().get(), "rfcore.bootstrap");
+            if (status != 0) {
+                LOGF("Failed to register service: %d", status);
+                return -1;
+            }
+
+            LOGI("RFCore Bootstrap registered successfully.");
+            join_pool();
+            return 0;
         }
         EOF
-        # 强行塞入 main.cpp 的第一行
-        sed -i '1i #include "fake_binder_api.h"' daemon/main.cpp 2>/dev/null || true
         
-        echo "3. 注入 AOSP 兼容垫片 (保护你的其他旧文件)..."
+        echo "3. 注入 AOSP 兼容垫片..."
         mkdir -p fake_aosp/android-base
         cat << 'EOF' > fake_aosp/android-base/logging.h
         #pragma once
@@ -65,7 +101,7 @@ jobs:
         #define PLOG(level) MockLog(0).s
         EOF
         
-        echo "4. 安装并锁定 Build-Tools 33.0.2 (解决代沟报错)..."
+        echo "4. 安装并锁定 Build-Tools 33.0.2..."
         if [ ! -f "$ANDROID_HOME/build-tools/33.0.2/aidl" ]; then
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;33.0.2"
         fi
@@ -100,25 +136,4 @@ jobs:
         if [ -f "build_out/rfcore_daemon" ]; then
             echo "Daemon 编译成功！"
         else
-            echo "Daemon 编译失败，请查看错误日志。"
-            exit 1
-        fi
-
-    - name: Assemble Magisk/KernelSU Module
-      run: |
-        mkdir -p module/system/bin
-        cp -r Magisk_module/* module/ 2>/dev/null || true
-        cp -r sepolicy/* module/ 2>/dev/null || true
-        cp build_out/rfcore_daemon module/system/bin/
-        chmod +x module/system/bin/rfcore_daemon
-        chmod +x module/*.sh 2>/dev/null || true
-
-        cd module
-        zip -r9 ../RFCore-Module-Release.zip ./*
-
-    - name: Upload Module Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: RFCore-Module-ZIP
-        path: RFCore-Module-Release.zip
-
+            echo 
