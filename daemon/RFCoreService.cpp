@@ -3,8 +3,6 @@
 #include "PolicyDatabase.h"
 
 #include <android/binder_ibinder.h>
-#include <android/binder_auto_utils.h>
-#include <android-base/logging.h>
 #include <time.h>
 
 namespace rfcore {

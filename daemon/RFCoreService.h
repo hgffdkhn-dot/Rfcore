@@ -1,7 +1,7 @@
 #pragma once
 
 #include <aidl/rfcore/daemon/BnRFCoreService.h>
-#include <android/binder_ibinder.h>
+// 不需要 AOSP 的 binder_ibinder，AIDL 生成文件会自动包含所需的 NDK binder 头
 #include <sys/types.h>
 #include <string>
 #include <vector>
