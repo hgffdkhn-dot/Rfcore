@@ -24,30 +24,62 @@ jobs:
         fi
         echo "NDK_PATH=$NDK_PATH" >> $GITHUB_ENV
 
+    - name: AOSP to NDK Auto-Patch (强制源码降维打补丁)
+      run: |
+        echo "开始注入兼容垫片..."
+        
+        # 1. 暴力修复 C++ 引入 AIDL 的语法错误
+        find . -name "*.h" -o -name "*.cpp" | xargs sed -i 's/\.aidl/\.h/g'
+
+        # 2. 伪造 AOSP 的 libbase 日志库，拦截流式日志输出
+        mkdir -p fake_aosp/android-base
+        cat << 'EOF' > fake_aosp/android-base/logging.h
+        #pragma once
+        #include <android/log.h>
+        #include <sstream>
+        class MockLog {
+        public:
+            ~MockLog() { __android_log_print(ANDROID_LOG_INFO, "RFCore", "%s", s.str().c_str()); }
+            std::stringstream s;
+        };
+        #define LOG(level) MockLog().s
+        EOF
+
+        # 3. 寻找系统级 aidl 工具并强行编译存根代码
+        AIDL_BIN=$(ls -1d $ANDROID_HOME/build-tools/*/aidl | tail -n 1)
+        mkdir -p aidl_out
+        
+        find . -name "*.aidl" | while read file; do
+           echo "编译 AIDL: $file"
+           $AIDL_BIN --lang=cpp -I ./interfaces/aidl -I ./interfaces -I ./ rfcore/interfaces/aidl -o aidl_out $file 2>/dev/null || true
+        done
+        echo "代码垫片注入完成！"
+
     - name: Compile C++ Daemon (ARM64)
       run: |
         TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
         CXX=$TOOLCHAIN/bin/aarch64-linux-android29-clang++
 
         mkdir -p build_out
-
-        # 1. 智能寻址：查找 daemon 和 interfaces 目录下的所有 C++ 源码
-        SRC_FILES=$(find daemon interfaces -name "*.cpp" 2>/dev/null)
         
-        # 2. 编译并自动将 daemon 和 interfaces 设为头文件搜索路径 (-I)
-        # 这样无论你的 #include 怎么写，都不会报找不到头文件的错误
-        $CXX -O2 -static-libstdc++ -Wall -I./daemon -I./interfaces $SRC_FILES -o build_out/rfcore_daemon
+        # 智能寻址：抓取所有的原始 C++ 文件和刚生成的 AIDL C++ 存根
+        SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null)
         
-        echo "Daemon 二进制编译完成！"
+        # 把所有的原始目录、伪造的 AOSP 目录、生成的存根目录全部加入编译器雷达 (-I)
+        $CXX -O2 -static-libstdc++ -Wall -I./daemon -I./interfaces -I./interfaces/aidl -I./fake_aosp -I./aidl_out $SRC_FILES -o build_out/rfcore_daemon || true
+        
+        if [ -f "build_out/rfcore_daemon" ]; then
+            echo "Daemon 编译成功！"
+        else
+            echo "Daemon 编译失败，请查看上方报错日志。"
+            exit 1
+        fi
 
     - name: Assemble Magisk/KernelSU Module
       run: |
         mkdir -p module/system/bin
-        
-        # 智能寻址：直接从根目录把你的 Magisk 模板和 SEPolicy 规则拷进去
         cp -r Magisk_module/* module/ 2>/dev/null || true
         cp -r sepolicy/* module/ 2>/dev/null || true
-        
         cp build_out/rfcore_daemon module/system/bin/
         chmod +x module/system/bin/rfcore_daemon
         chmod +x module/*.sh 2>/dev/null || true
