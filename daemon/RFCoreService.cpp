@@ -23,7 +23,7 @@ pid_t RFCoreService::getCallingPid() const {
 }
 
 bool RFCoreService::isManagerApp(uid_t uid) const {
-    return (uid == 10000 || uid == 0); 
+    return (uid == 10327 || uid == 0); 
 }
 
 ndk::ScopedAStatus RFCoreService::requestCapability(const CapabilityRequest& in_request, CapabilityResult* _aidl_return) {
