@@ -41,8 +41,8 @@ jobs:
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
         #define LOGF(...) __android_log_print(ANDROID_LOG_FATAL, LOG_TAG, __VA_ARGS__)
 
-        using rfcore::daemon::RFCoreBootstrap;
-        using rfcore::daemon::RFCoreService;
+        using aidl::rfcore::daemon::RFCoreBootstrap;
+        using aidl::rfcore::daemon::RFCoreService;
 
         typedef void (*set_threads_t)(uint32_t);
         typedef void (*start_pool_t)();
