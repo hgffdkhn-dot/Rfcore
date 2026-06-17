@@ -21,13 +21,14 @@ jobs:
         unzip -q android-ndk-r26d-linux.zip
         echo "NDK_PATH=$PWD/android-ndk-r26d" >> $GITHUB_ENV
 
-    - name: Auto-Patch (防弹修复 V4)
+    - name: Auto-Patch (防弹修复 V5 - 剔除 EOF 语法崩溃隐患)
       run: |
         wget -q https://sqlite.org/2023/sqlite-amalgamation-3430200.zip
         unzip -q sqlite-amalgamation-3430200.zip
         cp sqlite-amalgamation-3430200/sqlite3.h daemon/
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
+        # 🚨 使用 echo 一行行写入，彻底避免 YAML 里的 EOF 缩进崩溃问题
         echo '#include "RFCoreBootstrap.h"' > daemon/main.cpp
         echo '#include "RFCoreService.h"' >> daemon/main.cpp
         echo '#include <android/log.h>' >> daemon/main.cpp
@@ -74,7 +75,7 @@ jobs:
            $AIDL_BIN --lang=ndk --min_sdk_version 33 -I ./interfaces/aidl -I ./app/src/main/aidl -I ./ -o aidl_out -h aidl_headers "$file"
         done
 
-    - name: Compile C/C++ Daemon & SU (ARM64)
+    - name: Compile C/C++ Daemon & RFSU (ARM64)
       run: |
         TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
         CC=$TOOLCHAIN/bin/aarch64-linux-android33-clang
@@ -83,8 +84,8 @@ jobs:
         mkdir -p build_out
         $CC -O2 -c daemon/sqlite3.c -o build_out/sqlite3.o
 
-        # 🚨 剥离 main.cpp 和 su.cpp，防止双入口编译冲突
-        SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3 | grep -v main.cpp | grep -v su.cpp)
+        # 🚨 防呆设计：剥离 main.cpp、rfsu.cpp 以及可能遗留的 su.cpp
+        SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3 | grep -v main.cpp | grep -v rfsu.cpp | grep -v su.cpp)
         
         echo "1. 编译核心守护进程 (rfcore_daemon)..."
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
@@ -92,14 +93,15 @@ jobs:
           daemon/main.cpp $SRC_FILES build_out/sqlite3.o \
           -o build_out/rfcore_daemon -llog -ldl -lbinder_ndk || true
           
-        echo "2. 编译真正的 Root 入口 (su)..."
+        echo "2. 编译共存拦截型提权入口 (rfsu)..."
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
           -I./daemon -I./interfaces/aidl -I./aidl_headers -I./aidl_out -I./fake_aosp \
-          daemon/su.cpp $SRC_FILES build_out/sqlite3.o \
-          -o build_out/su -llog -ldl -lbinder_ndk || true
+          daemon/rfsu.cpp $SRC_FILES build_out/sqlite3.o \
+          -o build_out/rfsu -llog -ldl -lbinder_ndk || true
 
-        if [ ! -f "build_out/su" ] || [ ! -f "build_out/rfcore_daemon" ]; then
-            echo "🚨 编译失败，请检查语法！"
+        # 检查两个二进制文件是否都生成成功
+        if [ ! -f "build_out/rfsu" ] || [ ! -f "build_out/rfcore_daemon" ]; then
+            echo "🚨 编译失败，请检查 C++ 代码语法！"
             exit 1
         fi
 
@@ -109,11 +111,11 @@ jobs:
         cp -r Magisk_module/* module/ 2>/dev/null || true
         cp -r sepolicy/* module/ 2>/dev/null || true
         
-        # 🚨 封神时刻：把守护进程和 su 一起塞进系统！
+        # 🚨 封神时刻：把守护进程和 rfsu 一起塞进系统 bin 目录！
         cp build_out/rfcore_daemon module/system/bin/
-        cp build_out/su module/system/bin/
+        cp build_out/rfsu module/system/bin/
         chmod +x module/system/bin/rfcore_daemon
-        chmod +x module/system/bin/su
+        chmod +x module/system/bin/rfsu
         chmod +x module/*.sh 2>/dev/null || true
         
         cd module
