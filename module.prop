@@ -1,0 +1,6 @@
+id=rfcore_daemon
+name=RFCore Daemon Module
+version=v1.0
+versionCode=1
+author=RFCore Team
+description=RFCore 底层核心守护进程 (完美运行版)

@@ -1,10 +1,14 @@
 # rfcore sepolicy.rule
-# 这里的规则会在启动期被 magiskpolicy 或 ksu_susfs 注入，无视任何 neverallow
+# 这里的规则会在启动期被 magiskpolicy 或 KernelSU/APatch 注入，无视任何 neverallow
 
+# ==========================================
 # 1. 核心 Capability 提权
+# ==========================================
 allow rfcore_domain rfcore_domain capability { dac_override dac_read_search sys_admin sys_ptrace net_raw chown fowner kill mknod setuid setgid sys_module }
 
+# ==========================================
 # 2. 突破 Binder 跨域通信限制 (核心生命线)
+# ==========================================
 # 允许 rfcore_domain 成为 Binder 服务端
 allow rfcore_domain servicemanager binder { call transfer }
 allow servicemanager rfcore_domain dir { search }
@@ -14,11 +18,22 @@ allow servicemanager rfcore_domain process { getattr }
 # 允许随意注册和添加 Service (尤其是我们的 rfcore.bootstrap)
 allow rfcore_domain default_android_service service_manager { add find }
 
+# 🚨 核心补全：允许所有的普通 App 从 ServiceManager 中寻找到我们的默认服务！
+# 必须做细分域覆盖，防止高版本 Android 的严格管控拦截 App 获取底层 Binder
+allow untrusted_app_all default_android_service service_manager find
+allow untrusted_app default_android_service service_manager find
+allow untrusted_app_27 default_android_service service_manager find
+allow untrusted_app_29 default_android_service service_manager find
+allow untrusted_app_30 default_android_service service_manager find
+allow untrusted_app_32 default_android_service service_manager find
+
 # 允许 Client App (普通 untrusted_app) 调用我们
 allow untrusted_app_all rfcore_domain binder { call transfer }
 allow rfcore_domain untrusted_app_all binder { call transfer }
 
+# ==========================================
 # 3. 突破文件系统隔离
+# ==========================================
 # 允许读写任意 App 数据目录 (CAP_READ_FILE / CAP_WRITE_FILE)
 allow rfcore_domain app_data_file dir { create reparent rename rmdir setattr rw_dir_perms }
 allow rfcore_domain app_data_file file { create rename setattr unlink rw_file_perms }
