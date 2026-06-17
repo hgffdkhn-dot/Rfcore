@@ -28,7 +28,6 @@ jobs:
         cp sqlite-amalgamation-3430200/sqlite3.h daemon/
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
-        # 🚨 使用 echo 一行行写入，彻底避免 EOF 带来的语法崩溃
         echo '#include "RFCoreBootstrap.h"' > daemon/main.cpp
         echo '#include "RFCoreService.h"' >> daemon/main.cpp
         echo '#include <android/log.h>' >> daemon/main.cpp
@@ -75,7 +74,7 @@ jobs:
            $AIDL_BIN --lang=ndk --min_sdk_version 33 -I ./interfaces/aidl -I ./app/src/main/aidl -I ./ -o aidl_out -h aidl_headers "$file"
         done
 
-    - name: Compile C/C++ Daemon (ARM64)
+    - name: Compile C/C++ Daemon & SU (ARM64)
       run: |
         TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
         CC=$TOOLCHAIN/bin/aarch64-linux-android33-clang
@@ -84,18 +83,23 @@ jobs:
         mkdir -p build_out
         $CC -O2 -c daemon/sqlite3.c -o build_out/sqlite3.o
 
-        SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3)
+        # 🚨 剥离 main.cpp 和 su.cpp，防止双入口编译冲突
+        SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3 | grep -v main.cpp | grep -v su.cpp)
         
+        echo "1. 编译核心守护进程 (rfcore_daemon)..."
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
-          -I./daemon -I./interfaces/aidl \
-          -I./aidl_headers -I./aidl_out -I./fake_aosp \
-          $SRC_FILES build_out/sqlite3.o \
+          -I./daemon -I./interfaces/aidl -I./aidl_headers -I./aidl_out -I./fake_aosp \
+          daemon/main.cpp $SRC_FILES build_out/sqlite3.o \
           -o build_out/rfcore_daemon -llog -ldl -lbinder_ndk || true
-        
-        if [ -f "build_out/rfcore_daemon" ]; then
-            echo "Daemon 编译成功！"
-        else
-            echo "Daemon 编译失败，请查看错误日志。"
+          
+        echo "2. 编译真正的 Root 入口 (su)..."
+        $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
+          -I./daemon -I./interfaces/aidl -I./aidl_headers -I./aidl_out -I./fake_aosp \
+          daemon/su.cpp $SRC_FILES build_out/sqlite3.o \
+          -o build_out/su -llog -ldl -lbinder_ndk || true
+
+        if [ ! -f "build_out/su" ] || [ ! -f "build_out/rfcore_daemon" ]; then
+            echo "🚨 编译失败，请检查语法！"
             exit 1
         fi
 
@@ -104,9 +108,14 @@ jobs:
         mkdir -p module/system/bin
         cp -r Magisk_module/* module/ 2>/dev/null || true
         cp -r sepolicy/* module/ 2>/dev/null || true
+        
+        # 🚨 封神时刻：把守护进程和 su 一起塞进系统！
         cp build_out/rfcore_daemon module/system/bin/
+        cp build_out/su module/system/bin/
         chmod +x module/system/bin/rfcore_daemon
+        chmod +x module/system/bin/su
         chmod +x module/*.sh 2>/dev/null || true
+        
         cd module
         zip -r9 ../RFCore-Module-Release.zip ./*
 
