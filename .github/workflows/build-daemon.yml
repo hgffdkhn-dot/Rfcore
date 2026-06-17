@@ -44,7 +44,6 @@ jobs:
         using rfcore::daemon::RFCoreBootstrap;
         using rfcore::daemon::RFCoreService;
 
-        // 定义函数指针类型
         typedef void (*set_threads_t)(uint32_t);
         typedef void (*start_pool_t)();
         typedef void (*join_pool_t)();
@@ -52,33 +51,24 @@ jobs:
 
         int main() {
             LOGI("Starting RFCore Daemon process...");
-            
-            // 运行时直接装载系统真实的底层库
             void* handle = dlopen("libbinder_ndk.so", RTLD_NOW);
             if (!handle) { LOGF("dlopen failed"); return -1; }
-
-            // 强行抠出被隐藏的底层函数
             auto set_threads = (set_threads_t)dlsym(handle, "ABinderProcess_setThreadPoolMaxThreadCount");
             auto start_pool = (start_pool_t)dlsym(handle, "ABinderProcess_startThreadPool");
             auto join_pool = (join_pool_t)dlsym(handle, "ABinderProcess_joinThreadPool");
             auto add_service = (add_service_t)dlsym(handle, "AServiceManager_addService");
-
             if (!set_threads || !start_pool || !join_pool || !add_service) {
                 LOGF("dlsym resolve failed"); return -1;
             }
-
             set_threads(4);
             start_pool();
-
             std::shared_ptr<RFCoreService> worker = ndk::SharedRefBase::make<RFCoreService>();
             std::shared_ptr<RFCoreBootstrap> bootstrap = ndk::SharedRefBase::make<RFCoreBootstrap>(worker);
-
             int status = add_service(bootstrap->asBinder().get(), "rfcore.bootstrap");
             if (status != 0) {
                 LOGF("Failed to register service: %d", status);
                 return -1;
             }
-
             LOGI("RFCore Bootstrap registered successfully.");
             join_pool();
             return 0;
@@ -109,8 +99,12 @@ jobs:
         
         mkdir -p aidl_out
         mkdir -p aidl_headers
+        
+        echo "5. 🚨 核心修复：执行严格模式 AIDL 编译，去掉屏蔽错误的 2>/dev/null"
         find . -name "*.aidl" | while read file; do
-           $AIDL_BIN --lang=ndk --min_sdk_version 33 -I ./interfaces/aidl -I ./interfaces -I ./ -o aidl_out -h aidl_headers $file 2>/dev/null || true
+           echo ">>> 正在编译 AIDL: $file"
+           # 增加了 -I ./app/src/main/aidl 确保不管文件放在哪都能被引用，并去掉了隐藏错误的命令
+           $AIDL_BIN --lang=ndk --min_sdk_version 33 -I ./interfaces/aidl -I ./app/src/main/aidl -I ./ -o aidl_out -h aidl_headers "$file"
         done
 
     - name: Compile C/C++ Daemon (ARM64)
@@ -133,27 +127,4 @@ jobs:
           $SRC_FILES build_out/sqlite3.o \
           -o build_out/rfcore_daemon -llog -ldl -lbinder_ndk || true
         
-        if [ -f "build_out/rfcore_daemon" ]; then
-            echo "Daemon 编译成功！"
-        else
-            echo "Daemon 编译失败，请查看错误日志。"
-            exit 1
-        fi
-
-    - name: Assemble Magisk/KernelSU Module
-      run: |
-        mkdir -p module/system/bin
-        cp -r Magisk_module/* module/ 2>/dev/null || true
-        cp -r sepolicy/* module/ 2>/dev/null || true
-        cp build_out/rfcore_daemon module/system/bin/
-        chmod +x module/system/bin/rfcore_daemon
-        chmod +x module/*.sh 2>/dev/null || true
-
-        cd module
-        zip -r9 ../RFCore-Module-Release.zip ./*
-
-    - name: Upload Module Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: RFCore-Module-ZIP
-        path: RFCore-Module-Release.zip
+        if [ -f "build_out/rfcore_daemon" ]; t
