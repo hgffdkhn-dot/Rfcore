@@ -1,8 +1,10 @@
 #pragma once
 
 #include <aidl/rfcore/daemon/BnRFCoreService.h>
-// 🚨 必须引入刚刚编译生成的 Callback 头文件
-#include <aidl/rfcore/daemon/IAuthCallback.h> 
+#include <aidl/rfcore/daemon/IAuthCallback.h>
+// 🚨 引入我们为 su 专门定制的最新暗号
+#include <aidl/rfcore/daemon/AuthRequest.h>
+#include <aidl/rfcore/daemon/AuthResult.h>
 
 #include <memory>
 #include <mutex>
@@ -19,7 +21,7 @@ public:
     ~RFCoreService();
 
     // ==========================================
-    // 基础业务接口 (AIDL 自动生成的重写方法)
+    // 基础业务接口 (保留，防止 AIDL 报错)
     // ==========================================
     ndk::ScopedAStatus requestCapability(const CapabilityRequest& request, CapabilityResult* _aidl_return) override;
     ndk::ScopedAStatus isCapabilityGranted(const std::string& in_capability, bool* _aidl_return) override;
@@ -30,22 +32,26 @@ public:
     ndk::ScopedAStatus getAuditLogs(int32_t in_limit, int32_t in_offset, std::vector<AuditRecord>* _aidl_return) override;
 
     // ==========================================
-    // 🚨 新增：接听前台 Manager App 递过来的电话线
+    // 📞 核心回调：接听前台 Manager 递过来的电话线
     // ==========================================
     ndk::ScopedAStatus registerAuthCallback(const std::shared_ptr<IAuthCallback>& in_callback) override;
 
     // ==========================================
-    // 🚨 核心武器：供你的 Hook 代码调用的“时间停止”触发器
+    // 🚨 核心通道：专门接收 su 二进制文件的提权请求
+    // ==========================================
+    ndk::ScopedAStatus requestAuth(const AuthRequest& request, AuthResult* _aidl_return) override;
+
+    // ==========================================
+    // ⏳ 挂起触发器：供内部调用，卡死当前线程弹窗
     // ==========================================
     int triggerAuthIntercept(int target_uid, const std::string& processName, const std::string& capability);
 
 private:
-    // 内部鉴权工具：扫描 packages.list
+    // 内部鉴权工具
     bool isManagerApp(uid_t uid) const;
 
-    // 保存前台的接线员实例
+    // 保存前台的接线员实例和锁
     std::shared_ptr<IAuthCallback> mAuthCallback;
-    // 防止多线程抢占回调的锁
     std::mutex mCallbackMutex;
 };
 
