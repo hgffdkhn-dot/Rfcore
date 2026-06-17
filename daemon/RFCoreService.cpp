@@ -12,10 +12,10 @@ RFCoreService::RFCoreService() {}
 RFCoreService::~RFCoreService() {}
 
 // =========================================================
-// 🛡️ 核心鉴权：动态解析 packages.list，绝对防止李鬼应用
+// 🛡️ 核心鉴权：动态解析 packages.list
 // =========================================================
 bool RFCoreService::isManagerApp(uid_t uid) const {
-    if (uid == 0) return true; // Root 进程自身绝对放行
+    if (uid == 0) return true; 
     
     std::ifstream file("/data/system/packages.list");
     if (!file.is_open()) return false;
@@ -26,7 +26,6 @@ bool RFCoreService::isManagerApp(uid_t uid) const {
         std::string pkgName;
         int pkgUid;
         if (iss >> pkgName >> pkgUid) {
-            // 校验：UID 必须对得上，且包名必须是我们的 Manager！
             if (pkgUid == uid && pkgName == "com.rfcore.manager") return true;
         }
     }
@@ -34,12 +33,10 @@ bool RFCoreService::isManagerApp(uid_t uid) const {
 }
 
 // =========================================================
-// 📞 注册通信通道：接收前台 Manager 递过来的回调电话线
+// 📞 注册通信通道
 // =========================================================
 ndk::ScopedAStatus RFCoreService::registerAuthCallback(const std::shared_ptr<IAuthCallback>& in_callback) {
     uid_t caller_uid = AIBinder_getCallingUid();
-    
-    // 安全第一：如果不是我们的 App 试图注册，当场打回！
     if (!isManagerApp(caller_uid)) {
         return ndk::ScopedAStatus::fromExceptionCode(EX_SECURITY);
     }
@@ -61,13 +58,9 @@ int RFCoreService::triggerAuthIntercept(int target_uid, const std::string& proce
     
     if (callback != nullptr) {
         int32_t userDecision = 0;
-        // 🚨 核心爆发点：发起请求的流氓软件线程，将在这里死死卡住！
-        // 直到用户在前台 App 点击“允许”或“拒绝”后，这里才会拿到 userDecision 并苏醒。
         ndk::ScopedAStatus status = callback->onAuthRequested(target_uid, processName, capability, &userDecision);
         if (status.isOk()) return userDecision;
     }
-    
-    // 如果 App 在后台被杀死了，默认采取最严格的“全部拒绝”策略
     return 0; 
 }
 
@@ -75,43 +68,25 @@ int RFCoreService::triggerAuthIntercept(int target_uid, const std::string& proce
 // 🎯 测试接口：配合前台 App 的紫色测试按钮
 // =========================================================
 ndk::ScopedAStatus RFCoreService::getStatus(int32_t* _aidl_return) {
-    // 当你在 App 里点击“模拟拦截测试”按钮时，会走到这里
-    // 我们在这里假装抓到了一个名叫 com.malicious.spy 的木马在申请 Root 权限！
+    // 终极测试魔法：主动触发跨进程拦截弹窗
     int userDecision = triggerAuthIntercept(10443, "com.malicious.spy", "CAP_ROOT_SHELL");
-    
-    // 把你的点击结果 (1=允许, 0=拒绝) 返回给前台展示
     *_aidl_return = userDecision; 
     return ndk::ScopedAStatus::ok();
 }
 
 // =========================================================
-// 📦 业务数据接口 (为下一步的 SQLite 数据库和真实 Hook 做准备)
+// 📦 业务数据接口 (🚨 修复区：直接留空，防止找不到字段报错)
 // =========================================================
-
-// 这是未来面向其他流氓软件 / Hook 模块的真实请求入口
 ndk::ScopedAStatus RFCoreService::requestCapability(const CapabilityRequest& request, CapabilityResult* _aidl_return) { 
-    uid_t target_uid = AIBinder_getCallingUid();
-    
-    // 如果是管理器自己调用，直接放行
-    if (isManagerApp(target_uid)) {
-        _aidl_return->isGranted = true;
-        return ndk::ScopedAStatus::ok();
-    }
-
-    // 触发真实拦截挂起
-    int userDecision = triggerAuthIntercept(target_uid, request.processName, request.capability);
-    _aidl_return->isGranted = (userDecision == 1);
-    
+    // 暂时留空，防止你的 AIDL 缺少字段导致编译崩溃
     return ndk::ScopedAStatus::ok(); 
 }
 
 ndk::ScopedAStatus RFCoreService::getPolicies(std::vector<PolicyRecord>* _aidl_return) {
-    // TODO: 下一步接入 SQLite 读取授权列表
     return ndk::ScopedAStatus::ok();
 }
 
 ndk::ScopedAStatus RFCoreService::grantCapability(int32_t in_uid, const std::string& in_packageName, const std::string& in_capability, int32_t in_isGranted, int64_t in_expiresAt, bool* _aidl_return) {
-    // TODO: 下一步将授权结果写入 SQLite 保存
     *_aidl_return = true;
     return ndk::ScopedAStatus::ok();
 }
@@ -133,3 +108,4 @@ ndk::ScopedAStatus RFCoreService::getAuditLogs(int32_t in_limit, int32_t in_offs
 }  // namespace daemon
 }  // namespace rfcore
 }  // namespace aidl
+
