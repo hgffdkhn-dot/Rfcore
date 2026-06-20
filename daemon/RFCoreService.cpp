@@ -3,8 +3,13 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <vector>
 
-// 🚨 引入我们的 SQLite 大脑中枢
+// 🚨 独立版新增：系统底层调用必需的头文件
+#include <unistd.h>
+#include <sys/types.h>
+
+// 引入我们的 SQLite 大脑中枢
 #include "AuthDatabase.h"
 
 namespace aidl {
@@ -68,30 +73,67 @@ int RFCoreService::triggerAuthIntercept(int target_uid, const std::string& proce
 }
 
 // =========================================================
-// 🚨 终极核心：专门接收 su 二进制文件的提权呼叫
+// 🚀 独立版终极核心：接收 su 提权、查数据库、派生 Root Shell
 // =========================================================
 ndk::ScopedAStatus RFCoreService::requestAuth(const AuthRequest& request, AuthResult* _aidl_return) {
     uid_t target_uid = AIBinder_getCallingUid();
     
-    // 1. 如果是我们自己的管理器去调用 su，直接放行
+    // 1. 管理器自身直接放行
     if (isManagerApp(target_uid)) {
         _aidl_return->isGranted = true;
         return ndk::ScopedAStatus::ok();
     }
 
-    // 2. 去大脑(SQLite)里查一下，之前这个 UID 有没有点过允许或拒绝？
+    // 2. 去大脑(SQLite)里查记忆
     int decision = AuthDatabase::getInstance().getPolicy(target_uid, request.capability);
 
-    // 3. 如果等于 -1，说明是从未见过的新请求，立即挂起并呼叫前台弹窗！
+    // 3. 没见过的新请求，挂起并呼叫前台弹窗！
     if (decision == -1) {
         decision = triggerAuthIntercept(target_uid, request.processName, request.capability);
-        
-        // 4. 弹窗结束，把你在前台的选择，死死刻进 SQLite 数据库里！
         AuthDatabase::getInstance().setPolicy(target_uid, request.processName, request.capability, decision);
     }
 
-    // 5. 把最终结果回传给 su 信使
+    // 将授权结果写入返回值
     _aidl_return->isGranted = (decision == 1);
+
+    // ============================================================
+    // ⚡ 上帝之手：如果授权通过，立刻进行细胞分裂，派生 Root 进程！
+    // ============================================================
+    if (decision == 1) {
+        pid_t pid = fork();
+        
+        if (pid == 0) {
+            // -------- 子进程区域 (未来的 Root Shell) --------
+            
+            // 夺取绝对的 Root 权限
+            setresuid(0, 0, 0);
+            setresgid(0, 0, 0);
+
+            // 移花接木：把 App (比如 MT 管理器) 寄过来的包裹里的管子，插到自己身上
+            // 这样 Shell 的输出就会直接显示在 App 的屏幕上！
+            if (request.fdIn.get() >= 0) dup2(request.fdIn.get(), STDIN_FILENO);
+            if (request.fdOut.get() >= 0) dup2(request.fdOut.get(), STDOUT_FILENO);
+            if (request.fdErr.get() >= 0) dup2(request.fdErr.get(), STDERR_FILENO);
+
+            // 组装要执行的参数
+            std::vector<const char*> args;
+            args.push_back("/system/bin/sh"); // 永远以 Shell 身份启动
+            
+            for (const auto& arg : request.command) {
+                args.push_back(arg.c_str());
+            }
+            args.push_back(nullptr); // C 语言要求数组必须以 nullptr 结尾
+
+            // 蜕变！将当前子进程的肉体，直接替换为 /system/bin/sh！
+            execvp(args[0], const_cast<char* const*>(args.data()));
+            
+            // 如果 execvp 失败（比如找不到 sh），默默死亡，不留僵尸进程
+            exit(1); 
+            // ----------------------------------------------
+        }
+        // 父进程（rfcore_daemon 本体）继续运行，等待下一个提权请求
+    }
+
     return ndk::ScopedAStatus::ok();
 }
 
@@ -122,7 +164,7 @@ ndk::ScopedAStatus RFCoreService::getPolicies(std::vector<PolicyRecord>* _aidl_r
 }
 
 // =========================================================
-// 留空的老接口 (留着不删，防止 AIDL 报错)
+// 留空的老接口 (防止 AIDL 报错)
 // =========================================================
 ndk::ScopedAStatus RFCoreService::requestCapability(const CapabilityRequest& request, CapabilityResult* _aidl_return) { return ndk::ScopedAStatus::ok(); }
 ndk::ScopedAStatus RFCoreService::grantCapability(int32_t in_uid, const std::string& in_packageName, const std::string& in_capability, int32_t in_isGranted, int64_t in_expiresAt, bool* _aidl_return) { *_aidl_return = true; return ndk::ScopedAStatus::ok(); }
