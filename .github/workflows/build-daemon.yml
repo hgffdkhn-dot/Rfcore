@@ -19,13 +19,56 @@ jobs:
         unzip -q android-ndk-r26d-linux.zip
         echo "NDK_PATH=$PWD/android-ndk-r26d" >> $GITHUB_ENV
 
-    - name: Auto-Patch
+    - name: Auto-Patch (防弹修复 V6 - 恢复环境注入与清理幽灵文件)
       run: |
+        # 1. 准备 SQLite
         wget -q https://sqlite.org/2023/sqlite-amalgamation-3430200.zip
         unzip -q sqlite-amalgamation-3430200.zip
         cp sqlite-amalgamation-3430200/sqlite3.h daemon/
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
+        # 🚨 2. 清理幽灵文件：删掉你项目里残留的老版 PolicyDatabase
+        rm -f daemon/PolicyDatabase.cpp daemon/PolicyDatabase.h
+        
+        # 🚨 3. 恢复动态写入 main.cpp (彻底解决 binder_manager.h 找不到的问题)
+        echo '#include "RFCoreBootstrap.h"' > daemon/main.cpp
+        echo '#include "RFCoreService.h"' >> daemon/main.cpp
+        echo '#include <android/log.h>' >> daemon/main.cpp
+        echo '#include <dlfcn.h>' >> daemon/main.cpp
+        echo '#define LOG_TAG "RFCoreDaemon"' >> daemon/main.cpp
+        echo '#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)' >> daemon/main.cpp
+        echo '#define LOGF(...) __android_log_print(ANDROID_LOG_FATAL, LOG_TAG, __VA_ARGS__)' >> daemon/main.cpp
+        echo 'using aidl::rfcore::daemon::RFCoreBootstrap;' >> daemon/main.cpp
+        echo 'using aidl::rfcore::daemon::RFCoreService;' >> daemon/main.cpp
+        echo 'typedef void (*set_threads_t)(uint32_t);' >> daemon/main.cpp
+        echo 'typedef void (*start_pool_t)();' >> daemon/main.cpp
+        echo 'typedef void (*join_pool_t)();' >> daemon/main.cpp
+        echo 'typedef int (*add_service_t)(AIBinder*, const char*);' >> daemon/main.cpp
+        echo 'int main() {' >> daemon/main.cpp
+        echo '    void* handle = dlopen("libbinder_ndk.so", RTLD_NOW);' >> daemon/main.cpp
+        echo '    if (!handle) return -1;' >> daemon/main.cpp
+        echo '    auto set_threads = (set_threads_t)dlsym(handle, "ABinderProcess_setThreadPoolMaxThreadCount");' >> daemon/main.cpp
+        echo '    auto start_pool = (start_pool_t)dlsym(handle, "ABinderProcess_startThreadPool");' >> daemon/main.cpp
+        echo '    auto join_pool = (join_pool_t)dlsym(handle, "ABinderProcess_joinThreadPool");' >> daemon/main.cpp
+        echo '    auto add_service = (add_service_t)dlsym(handle, "AServiceManager_addService");' >> daemon/main.cpp
+        echo '    if (!set_threads || !start_pool || !join_pool || !add_service) return -1;' >> daemon/main.cpp
+        echo '    set_threads(4); start_pool();' >> daemon/main.cpp
+        echo '    std::shared_ptr<RFCoreService> worker = ndk::SharedRefBase::make<RFCoreService>();' >> daemon/main.cpp
+        echo '    std::shared_ptr<RFCoreBootstrap> bootstrap = ndk::SharedRefBase::make<RFCoreBootstrap>(worker);' >> daemon/main.cpp
+        echo '    add_service(bootstrap->asBinder().get(), "rfcore.bootstrap");' >> daemon/main.cpp
+        echo '    join_pool(); return 0;' >> daemon/main.cpp
+        echo '}' >> daemon/main.cpp
+        
+        # 🚨 4. 恢复 mock 日志头文件 (解决 logging.h 找不到的问题)
+        mkdir -p fake_aosp/android-base
+        echo '#pragma once' > fake_aosp/android-base/logging.h
+        echo '#include <android/log.h>' >> fake_aosp/android-base/logging.h
+        echo '#include <sstream>' >> fake_aosp/android-base/logging.h
+        echo 'class MockLog { public: MockLog(int) {} ~MockLog() { __android_log_print(ANDROID_LOG_INFO, "RFCore", "%s", s.str().c_str()); } std::stringstream s; };' >> fake_aosp/android-base/logging.h
+        echo '#define LOG(level) MockLog(0).s' >> fake_aosp/android-base/logging.h
+        echo '#define PLOG(level) MockLog(0).s' >> fake_aosp/android-base/logging.h
+        
+        # 5. 编译 AIDL
         if [ ! -f "$ANDROID_HOME/build-tools/33.0.2/aidl" ]; then
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;33.0.2"
         fi
@@ -43,25 +86,29 @@ jobs:
         mkdir -p build_out
         $CC -O2 -c daemon/sqlite3.c -o build_out/sqlite3.o
 
-        # 🚨 剥离 main.cpp 和 su.cpp (之前的 rfsu)
+        # 剥离 main.cpp 和 su.cpp
         SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3 | grep -v main.cpp | grep -v su.cpp)
         
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
           -I./daemon -I./interfaces/aidl -I./aidl_headers -I./aidl_out -I./fake_aosp \
           daemon/main.cpp $SRC_FILES build_out/sqlite3.o -o build_out/rfcore_daemon -llog -ldl -lbinder_ndk || true
           
-        # 🚨 编译真正的独立 su 入口
+        # 编译真正的独立 su 入口
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
           -I./daemon -I./interfaces/aidl -I./aidl_headers -I./aidl_out -I./fake_aosp \
           daemon/su.cpp $SRC_FILES build_out/sqlite3.o \
           -o build_out/su -llog -ldl -lbinder_ndk || true
+          
+        if [ ! -f "build_out/su" ] || [ ! -f "build_out/rfcore_daemon" ]; then
+            echo "🚨 编译失败！请检查日志。"
+            exit 1
+        fi
 
     - name: Assemble Independent Recovery Installer (TWRP ZIP)
       run: |
         mkdir -p installer/META-INF/com/google/android
         mkdir -p installer/bin
         
-        # 🚨 拷贝守护进程和 su
         cp build_out/rfcore_daemon installer/bin/
         cp build_out/su installer/bin/
         
@@ -116,7 +163,6 @@ jobs:
         RC_EOF
             
             ui_print "- 正在向 Ramdisk 注入核心..."
-            # 🚨 注入 su 和 rfcore_daemon
             ./magiskboot cpio ramdisk.cpio \
                 "mkdir 0750 overlay.d" \
                 "mkdir 0750 overlay.d/sbin" \
