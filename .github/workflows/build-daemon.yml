@@ -1,4 +1,4 @@
-name: Build RFCore Daemon Module
+name: Build RFCore Independent Engine
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-module:
+  build-engine:
     runs-on: ubuntu-latest
     
     steps:
@@ -14,115 +14,159 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Setup Android NDK
-      id: setup-ndk
       run: |
-        echo "正在拉取 NDK r26d..."
         wget -q https://dl.google.com/android/repository/android-ndk-r26d-linux.zip
         unzip -q android-ndk-r26d-linux.zip
         echo "NDK_PATH=$PWD/android-ndk-r26d" >> $GITHUB_ENV
 
-    - name: Auto-Patch (防弹修复 V5 - 剔除 EOF 语法崩溃隐患)
+    - name: Auto-Patch
       run: |
         wget -q https://sqlite.org/2023/sqlite-amalgamation-3430200.zip
         unzip -q sqlite-amalgamation-3430200.zip
         cp sqlite-amalgamation-3430200/sqlite3.h daemon/
         cp sqlite-amalgamation-3430200/sqlite3.c daemon/
         
-        # 🚨 使用 echo 一行行写入，彻底避免 YAML 里的 EOF 缩进崩溃问题
-        echo '#include "RFCoreBootstrap.h"' > daemon/main.cpp
-        echo '#include "RFCoreService.h"' >> daemon/main.cpp
-        echo '#include <android/log.h>' >> daemon/main.cpp
-        echo '#include <dlfcn.h>' >> daemon/main.cpp
-        echo '#define LOG_TAG "RFCoreDaemon"' >> daemon/main.cpp
-        echo '#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)' >> daemon/main.cpp
-        echo '#define LOGF(...) __android_log_print(ANDROID_LOG_FATAL, LOG_TAG, __VA_ARGS__)' >> daemon/main.cpp
-        echo 'using aidl::rfcore::daemon::RFCoreBootstrap;' >> daemon/main.cpp
-        echo 'using aidl::rfcore::daemon::RFCoreService;' >> daemon/main.cpp
-        echo 'typedef void (*set_threads_t)(uint32_t);' >> daemon/main.cpp
-        echo 'typedef void (*start_pool_t)();' >> daemon/main.cpp
-        echo 'typedef void (*join_pool_t)();' >> daemon/main.cpp
-        echo 'typedef int (*add_service_t)(AIBinder*, const char*);' >> daemon/main.cpp
-        echo 'int main() {' >> daemon/main.cpp
-        echo '    void* handle = dlopen("libbinder_ndk.so", RTLD_NOW);' >> daemon/main.cpp
-        echo '    if (!handle) return -1;' >> daemon/main.cpp
-        echo '    auto set_threads = (set_threads_t)dlsym(handle, "ABinderProcess_setThreadPoolMaxThreadCount");' >> daemon/main.cpp
-        echo '    auto start_pool = (start_pool_t)dlsym(handle, "ABinderProcess_startThreadPool");' >> daemon/main.cpp
-        echo '    auto join_pool = (join_pool_t)dlsym(handle, "ABinderProcess_joinThreadPool");' >> daemon/main.cpp
-        echo '    auto add_service = (add_service_t)dlsym(handle, "AServiceManager_addService");' >> daemon/main.cpp
-        echo '    if (!set_threads || !start_pool || !join_pool || !add_service) return -1;' >> daemon/main.cpp
-        echo '    set_threads(4); start_pool();' >> daemon/main.cpp
-        echo '    std::shared_ptr<RFCoreService> worker = ndk::SharedRefBase::make<RFCoreService>();' >> daemon/main.cpp
-        echo '    std::shared_ptr<RFCoreBootstrap> bootstrap = ndk::SharedRefBase::make<RFCoreBootstrap>(worker);' >> daemon/main.cpp
-        echo '    add_service(bootstrap->asBinder().get(), "rfcore.bootstrap");' >> daemon/main.cpp
-        echo '    join_pool(); return 0;' >> daemon/main.cpp
-        echo '}' >> daemon/main.cpp
-        
-        mkdir -p fake_aosp/android-base
-        echo '#pragma once' > fake_aosp/android-base/logging.h
-        echo '#include <android/log.h>' >> fake_aosp/android-base/logging.h
-        echo '#include <sstream>' >> fake_aosp/android-base/logging.h
-        echo 'class MockLog { public: MockLog(int) {} ~MockLog() { __android_log_print(ANDROID_LOG_INFO, "RFCore", "%s", s.str().c_str()); } std::stringstream s; };' >> fake_aosp/android-base/logging.h
-        echo '#define LOG(level) MockLog(0).s' >> fake_aosp/android-base/logging.h
-        echo '#define PLOG(level) MockLog(0).s' >> fake_aosp/android-base/logging.h
-        
         if [ ! -f "$ANDROID_HOME/build-tools/33.0.2/aidl" ]; then
           $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;33.0.2"
         fi
         AIDL_BIN=$ANDROID_HOME/build-tools/33.0.2/aidl
-        
         mkdir -p aidl_out aidl_headers
         find . -name "*.aidl" | while read file; do
            $AIDL_BIN --lang=ndk --min_sdk_version 33 -I ./interfaces/aidl -I ./app/src/main/aidl -I ./ -o aidl_out -h aidl_headers "$file"
         done
 
-    - name: Compile C/C++ Daemon & RFSU (ARM64)
+    - name: Compile C/C++ Engine (ARM64)
       run: |
         TOOLCHAIN=$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64
         CC=$TOOLCHAIN/bin/aarch64-linux-android33-clang
         CXX=$TOOLCHAIN/bin/aarch64-linux-android33-clang++
-
         mkdir -p build_out
         $CC -O2 -c daemon/sqlite3.c -o build_out/sqlite3.o
 
-        # 🚨 防呆设计：剥离 main.cpp、rfsu.cpp 以及可能遗留的 su.cpp
-        SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3 | grep -v main.cpp | grep -v rfsu.cpp | grep -v su.cpp)
+        # 🚨 剥离 main.cpp 和 su.cpp (之前的 rfsu)
+        SRC_FILES=$(find ./daemon aidl_out -name "*.cpp" 2>/dev/null | grep -v sqlite3 | grep -v main.cpp | grep -v su.cpp)
         
-        echo "1. 编译核心守护进程 (rfcore_daemon)..."
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
           -I./daemon -I./interfaces/aidl -I./aidl_headers -I./aidl_out -I./fake_aosp \
-          daemon/main.cpp $SRC_FILES build_out/sqlite3.o \
-          -o build_out/rfcore_daemon -llog -ldl -lbinder_ndk || true
+          daemon/main.cpp $SRC_FILES build_out/sqlite3.o -o build_out/rfcore_daemon -llog -ldl -lbinder_ndk || true
           
-        echo "2. 编译共存拦截型提权入口 (rfsu)..."
+        # 🚨 编译真正的独立 su 入口
         $CXX -O2 -std=c++17 -static-libstdc++ -Wall \
           -I./daemon -I./interfaces/aidl -I./aidl_headers -I./aidl_out -I./fake_aosp \
-          daemon/rfsu.cpp $SRC_FILES build_out/sqlite3.o \
-          -o build_out/rfsu -llog -ldl -lbinder_ndk || true
+          daemon/su.cpp $SRC_FILES build_out/sqlite3.o \
+          -o build_out/su -llog -ldl -lbinder_ndk || true
 
-        # 检查两个二进制文件是否都生成成功
-        if [ ! -f "build_out/rfsu" ] || [ ! -f "build_out/rfcore_daemon" ]; then
-            echo "🚨 编译失败，请检查 C++ 代码语法！"
-            exit 1
+    - name: Assemble Independent Recovery Installer (TWRP ZIP)
+      run: |
+        mkdir -p installer/META-INF/com/google/android
+        mkdir -p installer/bin
+        
+        # 🚨 拷贝守护进程和 su
+        cp build_out/rfcore_daemon installer/bin/
+        cp build_out/su installer/bin/
+        
+        echo "正在提取 magiskboot 神器..."
+        wget -qO magisk.apk https://github.com/topjohnwu/Magisk/releases/download/v26.4/Magisk-v26.4.apk
+        unzip -j magisk.apk "lib/arm64-v8a/libmagiskboot.so" -d installer/bin/
+        mv installer/bin/libmagiskboot.so installer/bin/magiskboot
+        chmod +x installer/bin/magiskboot
+        
+        echo "# Dummy file" > installer/META-INF/com/google/android/updater-script
+        
+        cat << 'EOF' > installer/META-INF/com/google/android/update-binary
+        #!/sbin/sh
+        OUTFD=$2
+        ZIPFILE=$3
+        ui_print() { echo -e "ui_print $1\nui_print" >&$OUTFD; }
+
+        ui_print "***********************************"
+        ui_print "* RFCore 独立 Root 引擎智能部署库 *"
+        ui_print "***********************************"
+
+        TMPDIR=/tmp/rfcore_install
+        rm -rf $TMPDIR; mkdir -p $TMPDIR
+        unzip -o "$ZIPFILE" -d $TMPDIR >/dev/null 2>&1
+
+        cd $TMPDIR/bin
+        chmod 755 magiskboot rfcore_daemon su
+
+        # 锁定内核分区
+        BOOT_DEV=$(ls /dev/block/by-name/boot* 2>/dev/null | head -n 1)
+        if [ -z "$BOOT_DEV" ]; then
+            BOOT_DEV=$(ls /dev/block/bootdevice/by-name/boot* 2>/dev/null | head -n 1)
+        fi
+        ui_print "- 锁定内核分区: $BOOT_DEV"
+
+        ui_print "- 正在提取并解包内核镜像..."
+        dd if=$BOOT_DEV of=boot.img >/dev/null 2>&1
+        ./magiskboot unpack boot.img >/dev/null 2>&1
+
+        if [ -f "ramdisk.cpio" ]; then
+            ui_print "✅ 架构分析: 存在 Ramdisk (标准注入模式)"
+            
+            cat << 'RC_EOF' > init.rfcore.rc
+        on post-fs-data
+            mkdir /data/adb/rfcore 0700 root root
+        service rfcore_daemon /overlay.d/sbin/rfcore_daemon
+            class core
+            user root
+            group root
+            seclabel u:r:su:s0
+            oneshot
+        RC_EOF
+            
+            ui_print "- 正在向 Ramdisk 注入核心..."
+            # 🚨 注入 su 和 rfcore_daemon
+            ./magiskboot cpio ramdisk.cpio \
+                "mkdir 0750 overlay.d" \
+                "mkdir 0750 overlay.d/sbin" \
+                "add 0755 overlay.d/sbin/rfcore_daemon rfcore_daemon" \
+                "add 0755 overlay.d/sbin/su su" \
+                "add 0644 init.rfcore.rc init.rfcore.rc" \
+                "patch" >/dev/null 2>&1
+                
+        else
+            ui_print "⚠️ 架构分析: System-as-Root (无 Ramdisk 机型)"
+            ui_print "-> 正在施展黑魔法: HexPatch 强制唤醒 initramfs"
+            ./magiskboot hexpatch kernel 736B69705F696E697472616D667300 77616E745F696E697472616D667300 >/dev/null 2>&1
+            
+            ui_print "-> 触发混合直装回退机制，准备注入 System..."
+            mount -o rw,remount /system || mount /system
+            
+            cp rfcore_daemon /system/bin/
+            cp su /system/bin/
+            chmod 0755 /system/bin/rfcore_daemon /system/bin/su
+            
+            cat << 'RC_EOF' > /system/etc/init/init.rfcore.rc
+        on post-fs-data
+            mkdir /data/adb/rfcore 0700 root root
+        service rfcore_daemon /system/bin/rfcore_daemon
+            class core
+            user root
+            group root
+            seclabel u:r:su:s0
+            oneshot
+        RC_EOF
+            chmod 0644 /system/etc/init/init.rfcore.rc
+            ui_print "✅ 已成功兼容老牌 SAR 设备"
         fi
 
-    - name: Assemble Magisk/KernelSU Module
-      run: |
-        mkdir -p module/system/bin
-        cp -r Magisk_module/* module/ 2>/dev/null || true
-        cp -r sepolicy/* module/ 2>/dev/null || true
-        
-        # 🚨 封神时刻：把守护进程和 rfsu 一起塞进系统 bin 目录！
-        cp build_out/rfcore_daemon module/system/bin/
-        cp build_out/rfsu module/system/bin/
-        chmod +x module/system/bin/rfcore_daemon
-        chmod +x module/system/bin/rfsu
-        chmod +x module/*.sh 2>/dev/null || true
-        
-        cd module
-        zip -r9 ../RFCore-Module-Release.zip ./*
+        ui_print "- 正在重新封包内核..."
+        ./magiskboot repack boot.img new-boot.img >/dev/null 2>&1
 
-    - name: Upload Module Artifact
+        ui_print "- 正在将新生命注入设备底层..."
+        dd if=new-boot.img of=$BOOT_DEV >/dev/null 2>&1
+
+        ui_print "- 独立版部署完毕！Welcome to RFCore!"
+        exit 0
+        EOF
+
+        chmod 755 installer/META-INF/com/google/android/update-binary
+        cd installer
+        zip -r9 ../RFCore-Independent-Installer.zip ./*
+
+    - name: Upload Installer Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: RFCore-Module-ZIP
-        path: RFCore-Module-Release.zip
+        name: RFCore-Independent-ZIP
+        path: RFCore-Independent-Installer.zip
